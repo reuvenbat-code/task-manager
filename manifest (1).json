@@ -23,22 +23,5 @@
       "purpose": "any maskable"
     }
   ],
-  "categories": ["productivity", "utilities"],
-  "screenshots": [],
-  "shortcuts": [
-    {
-      "name": "אינבוקס GTD",
-      "short_name": "אינבוקס",
-      "description": "פתח את האינבוקס לכידה מהירה",
-      "url": "./?view=inbox",
-      "icons": [{ "src": "./icon-192.png", "sizes": "192x192" }]
-    },
-    {
-      "name": "משימה חדשה",
-      "short_name": "משימה",
-      "description": "צור משימה חדשה",
-      "url": "./?action=new-task",
-      "icons": [{ "src": "./icon-192.png", "sizes": "192x192" }]
-    }
-  ]
+  "categories": ["productivity", "utilities"]
 }
