@@ -923,8 +923,14 @@ function loadDB(){
   }catch(e){}
   return defaultDB();
 }
+let _gistSyncTimer=null;
 function saveDB(){
   try{localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));}catch(e){}
+  // סינכרון אוטומטי ל-Gist — 10 שניות אחרי השינוי האחרון
+  if(DB.gistToken&&DB.gistId){
+    clearTimeout(_gistSyncTimer);
+    _gistSyncTimer=setTimeout(()=>syncToGistSilent(),10000);
+  }
 }
 function uid(){return 't'+Date.now()+Math.random().toString(36).slice(2,7)}
 
@@ -4177,6 +4183,23 @@ async function syncToGist(){
     if(res.ok) showToast('נשמר בהצלחה ל-Gist ✓');
     else showToast('שגיאה: '+res.status+' ⚠️');
   }catch(e){showToast('שגיאת רשת ⚠️');}
+}
+
+async function syncToGistSilent(){
+  if(!DB.gistToken||!DB.gistId) return;
+  try{
+    await fetch(`https://api.github.com/gists/${DB.gistId}`,{
+      method:'PATCH',
+      headers:{'Authorization':`token ${DB.gistToken}`,'Content-Type':'application/json'},
+      body:JSON.stringify({files:{'data.json':{content:JSON.stringify(DB)}}})
+    });
+    // מציג אינדיקטור קטן בפינה
+    const el=document.createElement('div');
+    el.style.cssText='position:fixed;bottom:72px;right:12px;font-size:11px;color:var(--green);background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;z-index:9999;opacity:1;transition:opacity 1s';
+    el.textContent='☁️ סונכרן';
+    document.body.appendChild(el);
+    setTimeout(()=>{el.style.opacity='0';setTimeout(()=>el.remove(),1000);},2000);
+  }catch(e){} // שקט בשגיאות רשת
 }
 async function syncFromGist(){
   if(!DB.gistToken||!DB.gistId){showToast('חסרים Token ו-Gist ID ⚠️');return;}
