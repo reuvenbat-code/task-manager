@@ -1,4 +1,4 @@
-const CACHE_NAME = 'task-manager-v10';
+const CACHE_NAME = 'task-manager-v11';
 
 const ASSETS = [
   './',
