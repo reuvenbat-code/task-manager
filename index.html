@@ -637,9 +637,24 @@ function escAttr(s){
   return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 // escape for inclusion inside JS string literal delimited by single quotes (for inline onclick="foo('${escJs(x)}')")
+// FIX-5 / QUALITY-1: two passes - first JS-escape, then HTML-escape the result, so
+// user-controlled strings (status names, tag names, folder names etc.) cannot
+// break out of the attribute context and cause XSS.
 function escJs(s){
   if(s===undefined||s===null) return '';
-  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'').replace(/</g,'\\x3C');
+  const jsEscaped=String(s)
+    .replace(/\\/g,'\\\\')
+    .replace(/'/g,"\\'")
+    .replace(/"/g,'\\"')
+    .replace(/\n/g,'\\n')
+    .replace(/\r/g,'')
+    .replace(/\u2028/g,'\\u2028')
+    .replace(/\u2029/g,'\\u2029')
+    .replace(/</g,'\\x3C')
+    .replace(/>/g,'\\x3E')
+    .replace(/&/g,'\\x26');
+  // second pass: HTML-escape so the result is also safe inside an attribute
+  return jsEscaped.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ============================================================
@@ -758,6 +773,9 @@ function ensureGeneralSpace(db){
 }
 
 // Recalculate 'task_count' targets across all goals based on current tasks.
+// FIX-10: this is now only called on explicit demand (saveDBFull, import, migration).
+// For individual task mutations we use recalcGoalProgressFor(goalId) which is O(tasks)
+// per affected goal, instead of O(goals * targets * tasks) on every save.
 function recalcGoalProgress(){
   (DB.goals||[]).forEach(g=>{
     (g.targets||[]).forEach(t=>{
@@ -767,23 +785,75 @@ function recalcGoalProgress(){
     });
   });
 }
+// FIX-10: targeted recalc — only rebuild targets for one specific goal.
+function recalcGoalProgressFor(goalId){
+  if(!goalId) return;
+  const g=(DB.goals||[]).find(x=>x.id===goalId);
+  if(!g) return;
+  (g.targets||[]).forEach(t=>{
+    if(t.type==='task_count'){
+      t.current=DB.tasks.filter(tk=>tk.goalId===g.id&&tk.status==='הושלם').length;
+    }
+  });
+}
 
 // FIX #7: gist sync with lock to prevent concurrent writes
 let _gistSyncTimer=null;
 let _gistSyncing=false;
 let _syncStatus='idle'; // idle|pending|synced|error
+// FIX-12: backoff after consecutive sync failures. After 3 silent failures
+// we stop auto-syncing and notify the user; manual sync resets the counter.
+let _gistFailures=0;
+const _gistMaxFailures=3;
 
 function saveDB(){
-  recalcGoalProgress();
+  // FIX-10: no longer call recalcGoalProgress() on every save. Callers that
+  // mutate goalId/status call recalcGoalProgressFor(goalId) themselves.
   try{localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));}catch(e){console.warn('saveDB failed:',e);}
-  if(DB.gistToken&&DB.gistId){
+  if(DB.gistToken&&DB.gistId&&_gistFailures<_gistMaxFailures){
     setSyncStatus('pending');
     clearTimeout(_gistSyncTimer);
     _gistSyncTimer=setTimeout(()=>syncToGistSilent(),10000);
   }
 }
 
+// Full save with full goal-recalc — used on import, migration, batch ops.
+function saveDBFull(){
+  recalcGoalProgress();
+  saveDB();
+}
+
 function uid(){return 't'+Date.now()+Math.random().toString(36).slice(2,7)}
+
+// FIX-6: activity entries and comments now store a real timestamp (`ts`)
+// and the UI formats it relative to 'now' on each render. Old entries that
+// used {time:'לפני שעה'} strings still work via displayActivityTime().
+function nowTs(){return Date.now();}
+function formatRelativeTime(ts){
+  if(!ts) return '';
+  if(typeof ts==='string') return ts; // legacy — show as-is
+  const diff=Date.now()-ts;
+  const sec=Math.floor(diff/1000);
+  if(sec<10) return 'זה עתה';
+  if(sec<60) return `לפני ${sec} שניות`;
+  const min=Math.floor(sec/60);
+  if(min<60) return `לפני ${min} דקות`;
+  const hr=Math.floor(min/60);
+  if(hr<24) return `לפני ${hr} שעות`;
+  const day=Math.floor(hr/24);
+  if(day<7) return `לפני ${day} ימים`;
+  const wk=Math.floor(day/7);
+  if(wk<5) return `לפני ${wk} שבועות`;
+  const mo=Math.floor(day/30);
+  if(mo<12) return `לפני ${mo} חודשים`;
+  return `לפני ${Math.floor(mo/12)} שנים`;
+}
+// Back-compat: accept either {time:'...'} (legacy) or {ts:<number>} in records.
+function displayActivityTime(entry){
+  if(!entry) return '';
+  if(entry.ts) return formatRelativeTime(entry.ts);
+  return entry.time||'';
+}
 
 function setSyncStatus(s){
   _syncStatus=s;
@@ -1119,16 +1189,20 @@ function setTaskStatus(id,status){
   if(!t) return;
   t.status=status;
   if(status==='הושלם'&&t.recurrence&&t.due){
-    const next=calcNextDate(t.due,t.recurrence);
+    // FIX-7: next occurrence is based on date of completion (today), not on t.due.
+    const todayStr=new Date().toISOString().slice(0,10);
+    const next=calcNextDate(todayStr,t.recurrence);
     if(next){
       const copy=JSON.parse(JSON.stringify(t));
       copy.id=uid();copy.status='לביצוע';copy.due=next;
       copy.subtasks=(t.subtasks||[]).map(s=>({...s,done:false}));
-      copy.comments=[];copy.timeSpent=0;
+      copy.comments=[];copy.timeSpent=0;copy.activity=[];
       DB.tasks.push(copy);
       showToast(`משימה חוזרת נוצרה: ${formatDate(next)} 🔄`);
     }
   }
+  // FIX-10: targeted goal recalc (only if this task is linked to a goal)
+  if(t.goalId) recalcGoalProgressFor(t.goalId);
   saveDB();renderContent();
 }
 
@@ -1223,8 +1297,12 @@ function saveFolder(id){
   saveDB();closeModal();renderAll();showToast('תיקייה עודכנה ✓');
 }
 
+// FIX-4: scope selector to the immediate parent container of color swatches.
+// Previously document.querySelectorAll('[data-color]') matched swatches in all
+// open modals/forms simultaneously, causing visual bleed between pickers.
 function pickColor(el,inputId,color){
-  document.querySelectorAll(`[data-color]`).forEach(d=>d.style.border='3px solid transparent');
+  const container=el.parentElement||document;
+  container.querySelectorAll('[data-color]').forEach(d=>d.style.border='3px solid transparent');
   el.style.border='3px solid #fff';
   const inp=document.getElementById(inputId);
   if(inp) inp.value=color;
@@ -1618,7 +1696,17 @@ function renderDashboardDesktop({allTasks,done,inProgress,overdue,todayTasks,rec
 // ============================================================
 function renderMyTasks(){
   const today=new Date().toISOString().slice(0,10);
-  let tasks=DB.tasks.filter(t=>t.status!=='הושלם');
+  // FIX-2: when there is an active global search, include completed tasks too
+  // (so the user can find finished work), and filter by name/description.
+  const q=(state.searchQuery||'').toLowerCase().trim();
+  let tasks=q ? DB.tasks.slice() : DB.tasks.filter(t=>t.status!=='הושלם');
+  if(q){
+    tasks=tasks.filter(t=>
+      (t.name||'').toLowerCase().includes(q)||
+      (t.desc||'').toLowerCase().includes(q)||
+      (t.tags||[]).some(tag=>(tag||'').toLowerCase().includes(q))
+    );
+  }
 
   if(state.myFilterStatus.length)
     tasks=tasks.filter(t=>state.myFilterStatus.includes(t.status));
@@ -1669,6 +1757,14 @@ function renderMyTasks(){
       </button>
       ${hasFilters?`<button class="btn btn-ghost btn-sm" onclick="clearMyFilters()">✕</button>`:''}
     </div>
+
+    ${state.searchQuery?`
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;background:var(--accent-bg);border:1px solid rgba(124,106,247,0.25);border-radius:var(--radius-sm)">
+        <span style="font-size:12px;color:var(--text2)">🔍 מחפש:</span>
+        <span style="font-size:13px;font-weight:600;color:var(--accent2);flex:1">${escHtml(state.searchQuery)}</span>
+        <button class="btn-icon" onclick="clearGlobalSearch()" title="נקה חיפוש" style="color:var(--text2)">✕</button>
+      </div>
+    `:''}
 
     ${hasFilters?`
       <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">
@@ -2359,16 +2455,20 @@ function createTaskForGoal(goalId){
 function unlinkFromGoal(taskId){
   const t=DB.tasks.find(x=>x.id===taskId);
   if(!t) return;
+  const oldGoalId=t.goalId;
   t.goalId=null;
-  (t.activity=t.activity||[]).push({text:'הוסר שיוך ליעד',time:'עכשיו'});
+  (t.activity=t.activity||[]).push({text:'הוסר שיוך ליעד',ts:nowTs()});
+  // FIX-10: targeted goal recalc
+  if(oldGoalId) recalcGoalProgressFor(oldGoalId);
   saveDB();renderContent();
 }
 
 // ============================================================
 // DOCS
 // ============================================================
-// FIX #24: debounced autosave
-let _docSaveTimer=null;
+// FIX-3: title and body have separate debounce timers (_docTitleSaveTimer,
+// _docBodySaveTimer) defined near their usage below. The old single timer
+// caused title edits to be cancelled by rapid body edits.
 function renderDocs(){
   if(state.editingDoc){
     const doc=DB.docs.find(d=>d.id===state.editingDoc);
@@ -2418,7 +2518,33 @@ function renderDocs(){
 }
 
 function editDoc(id){state.editingDoc=id;renderContent();}
-function updateDocTitle(id,val){const d=DB.docs.find(x=>x.id===id);if(d){d.title=val;clearTimeout(_docSaveTimer);_docSaveTimer=setTimeout(()=>saveDB(),500);}}
+
+// FIX-3: separate timers for title vs body so they don't cancel each other,
+// and a flush() helper that runs saves immediately (used from beforeunload/visibilitychange).
+let _docTitleSaveTimer=null;
+let _docBodySaveTimer=null;
+let _pendingDocId=null;
+function flushDocSave(){
+  if(!_pendingDocId) return;
+  const d=DB.docs.find(x=>x.id===_pendingDocId);
+  if(!d) {_pendingDocId=null;return;}
+  const body=document.getElementById('docBody');
+  if(body) d.content=body.innerHTML;
+  const titleInput=document.querySelector('.doc-editor-title');
+  if(titleInput) d.title=titleInput.value;
+  d.updated=new Date().toISOString().slice(0,10);
+  clearTimeout(_docTitleSaveTimer);
+  clearTimeout(_docBodySaveTimer);
+  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));}catch(e){}
+}
+function updateDocTitle(id,val){
+  const d=DB.docs.find(x=>x.id===id);
+  if(!d) return;
+  d.title=val;
+  _pendingDocId=id;
+  clearTimeout(_docTitleSaveTimer);
+  _docTitleSaveTimer=setTimeout(()=>saveDB(),500);
+}
 function saveDoc(id){
   const body=document.getElementById('docBody');
   if(body){const d=DB.docs.find(x=>x.id===id);if(d){d.content=body.innerHTML;d.updated=new Date().toISOString().slice(0,10);saveDB();}}
@@ -2427,8 +2553,9 @@ function saveDoc(id){
 function autoSaveDoc(id){
   const body=document.getElementById('docBody');
   if(!body) return;
-  clearTimeout(_docSaveTimer);
-  _docSaveTimer=setTimeout(()=>{
+  _pendingDocId=id;
+  clearTimeout(_docBodySaveTimer);
+  _docBodySaveTimer=setTimeout(()=>{
     const d=DB.docs.find(x=>x.id===id);
     if(d){d.content=body.innerHTML;d.updated=new Date().toISOString().slice(0,10);saveDB();}
   },800);
@@ -2597,7 +2724,18 @@ function stopTimer(){
   renderContent();
 }
 
+// FIX-9: deleting a time entry now also subtracts its minutes from the linked
+// task's timeSpent. Previously the task's total would drift higher than the sum
+// of logged entries because only the entry was removed, not the task total.
 function deleteTimeEntry(id){
+  const entry=(DB.timeEntries||[]).find(e=>e.id===id);
+  if(entry){
+    const t=DB.tasks.find(x=>x.id===entry.taskId);
+    if(t){
+      const minutes=Math.round((entry.seconds||0)/60);
+      t.timeSpent=Math.max(0,(t.timeSpent||0)-minutes);
+    }
+  }
   DB.timeEntries=(DB.timeEntries||[]).filter(e=>e.id!==id);
   saveDB();renderContent();
 }
@@ -2751,6 +2889,8 @@ function renderSettingsGist(){
 function saveGistCredentials(){
   DB.gistToken=document.getElementById('gt')?.value?.trim()||'';
   DB.gistId=document.getElementById('gi')?.value?.trim()||'';
+  // FIX-12: user fixing credentials → give auto-sync a fresh start
+  _gistFailures=0;
   saveDB();showToast('פרטי סינכרון נשמרו ✓');
 }
 
@@ -2996,7 +3136,15 @@ function doProcessAsTask(id){
     timeSpent:0,subtasks:[],customFields:{},comments:[],activity:[]
   };
   DB.tasks.push(task);
-  markProcessed(id);
+  // FIX-1: if this flow started from 'someday → task', remove the someday item too.
+  if(state._somedayBeingConverted===id){
+    DB.someday=(DB.someday||[]).filter(x=>x.id!==id);
+    state._somedayBeingConverted=null;
+  } else {
+    // Regular inbox flow
+    markProcessed(id);
+  }
+  saveDB();
   closeModal();
   showToast('נוצרה משימה ✓');
 }
@@ -3037,13 +3185,20 @@ function doProcessAsProject(id){
   showToast('נוצר פרויקט ✓');
 }
 
-function processAsSomeday(id){
-  const it=DB.inbox.find(x=>x.id===id);
+// FIX-8: optional silent mode lets the guided-review loop avoid a double render
+// (one from markProcessed, one from the next modal). In silent mode: no toast,
+// no renderContent — caller is responsible for the next UI transition.
+function processAsSomeday(id,silent){
+  const it=(DB.inbox||[]).find(x=>x.id===id);
   if(!it) return;
   DB.someday=DB.someday||[];
   DB.someday.push({id:uid(),text:it.text,created:new Date().toISOString().slice(0,10)});
-  markProcessed(id);
-  showToast('הועבר ליום אחד 🌙');
+  it.processed=true;
+  saveDB();
+  if(!silent){
+    renderContent();
+    showToast('הועבר ליום אחד 🌙');
+  }
 }
 
 function processAsRef(id){
@@ -3131,9 +3286,12 @@ function doProcessAsWaiting(id){
   showToast('נוסף כממתין ✓');
 }
 
-function markProcessed(id){
+// FIX-8: optional `silent` mode avoids an intermediate renderContent() between
+// guided steps (processing many inbox items in a row). The final step's
+// processItemGuided() opens the next modal / renders when guided flow ends.
+function markProcessed(id,silent){
   const it=DB.inbox.find(x=>x.id===id);
-  if(it){it.processed=true;saveDB();renderContent();}
+  if(it){it.processed=true;saveDB();if(!silent)renderContent();}
 }
 
 function deleteInboxItem(id){
@@ -3200,8 +3358,16 @@ function guidedAction(id,action){
   if(action==='project'){processAsProject(id);return;}
   if(action==='ref'){processAsRef(id);return;}
   if(action==='waiting'){processAsWaiting(id);return;}
-  if(action==='someday'){processAsSomeday(id);guidedNext();return;}
-  if(action==='delete'){deleteInboxItem(id);guidedNext();return;}
+  // FIX-8: silent variants skip intermediate renders — guidedNext opens the
+  // next modal immediately, so we don't need to repaint the inbox list in
+  // between (causes a visible flicker otherwise).
+  if(action==='someday'){processAsSomeday(id,true);guidedNext();return;}
+  if(action==='delete'){
+    DB.inbox=(DB.inbox||[]).filter(x=>x.id!==id);
+    saveDB();
+    guidedNext();
+    return;
+  }
 }
 
 function guidedNext(){state._guidedIdx++;processItemGuided();}
@@ -3287,14 +3453,10 @@ function renderSomeday(){
 function somedayToTask(id){
   const it=(DB.someday||[]).find(x=>x.id===id);
   if(!it) return;
+  // FIX-1: no monkey-patch. Set a flag that doProcessAsTask reads and clears.
+  // If the user cancels the modal, the flag gets cleared on modal close.
+  state._somedayBeingConverted=id;
   confirmProcessTask(id,it.text);
-  const orig=window.doProcessAsTask;
-  window.doProcessAsTask=function(origId){
-    orig(origId);
-    DB.someday=DB.someday.filter(x=>x.id!==origId);
-    saveDB();
-    window.doProcessAsTask=orig;
-  };
 }
 
 function deleteSomeday(id){
@@ -3470,11 +3632,36 @@ function applyFilters(tasks){
   return out;
 }
 
+// FIX-2: global search actually works now — searchQuery is consumed by renderMyTasks.
+// Clearing the search empties state.searchQuery instead of doing nothing.
+let _globalSearchTimer=null;
 function globalSearchFn(query){
-  if(!query||!query.trim()){return;}
-  state.searchQuery=query.trim();
-  state.view='my-tasks';
-  renderAll();
+  const q=(query||'').trim();
+  clearTimeout(_globalSearchTimer);
+  if(!q){
+    // empty → clear search and, if we navigated here due to search, leave silently
+    if(state.searchQuery){
+      state.searchQuery='';
+      if(state.view==='my-tasks') renderContent();
+    }
+    return;
+  }
+  // tiny debounce so a rapid typist doesn't navigate on every character
+  _globalSearchTimer=setTimeout(()=>{
+    state.searchQuery=q;
+    if(state.view!=='my-tasks'){
+      state.view='my-tasks';
+      renderAll();
+    } else {
+      renderContent();
+    }
+  },180);
+}
+function clearGlobalSearch(){
+  state.searchQuery='';
+  const inp=document.getElementById('globalSearch');
+  if(inp) inp.value='';
+  renderContent();
 }
 
 function sortBy(field){
@@ -3591,7 +3778,7 @@ function renderTaskModal(t){
               <div class="comment-item">
                 <div class="avatar" style="width:28px;height:28px;font-size:11px">${escHtml(c.author)}</div>
                 <div class="comment-body">
-                  <div><span class="comment-author">${escHtml(c.author)}</span><span class="comment-time">${escHtml(c.time)}</span></div>
+                  <div><span class="comment-author">${escHtml(c.author)}</span><span class="comment-time">${escHtml(displayActivityTime(c))}</span></div>
                   <div class="comment-text">${escHtml(c.text)}</div>
                 </div>
               </div>
@@ -3611,7 +3798,7 @@ function renderTaskModal(t){
                 <div class="activity-dot"></div>
                 <div class="activity-content">
                   <div style="font-size:13px">${escHtml(a.text)}</div>
-                  <div class="activity-time">${escHtml(a.time)}</div>
+                  <div class="activity-time">${escHtml(displayActivityTime(a))}</div>
                 </div>
               </div>
             `).join('')}
@@ -3685,7 +3872,9 @@ function updateTaskField(id,field,val){
   if(!t) return;
   const old=t[field];
   t[field]=val;
-  (t.activity=t.activity||[]).push({text:`${field} שונה`,time:'עכשיו'});
+  (t.activity=t.activity||[]).push({text:`${field} שונה`,ts:nowTs()});
+  // FIX-10: targeted goal recalc when status crosses completion boundary
+  if(field==='status'&&t.goalId&&(val==='הושלם'||old==='הושלם')) recalcGoalProgressFor(t.goalId);
   saveDB();
   // re-render list content only (not modal) for status/priority/due changes to update the underlying task row
   // but do NOT re-render the modal which would wipe input focus
@@ -3713,8 +3902,12 @@ function updateTaskTags(id,val){
 function updateTaskGoal(id,goalId){
   const t=DB.tasks.find(x=>x.id===id);
   if(!t) return;
+  const oldGoalId=t.goalId;
   t.goalId=goalId||null;
-  (t.activity=t.activity||[]).push({text:goalId?`שויך ליעד`:'הוסר שיוך ליעד',time:'עכשיו'});
+  (t.activity=t.activity||[]).push({text:goalId?`שויך ליעד`:'הוסר שיוך ליעד',ts:nowTs()});
+  // FIX-10: targeted goal recalc — both old and new goal may need updating
+  if(oldGoalId&&oldGoalId!==t.goalId) recalcGoalProgressFor(oldGoalId);
+  if(t.goalId) recalcGoalProgressFor(t.goalId);
   saveDB();
   // re-render if we're on goals page so counts update
   if(state.view==='goals') renderContent();
@@ -3726,7 +3919,9 @@ function toggleTaskDone(id,checked){
   if(checked){
     t.status='הושלם';
     if(t.recurrence&&t.due){
-      const next=calcNextDate(t.due,t.recurrence);
+      // FIX-7: next occurrence is based on date of completion (today), not on t.due.
+      const todayStr=new Date().toISOString().slice(0,10);
+      const next=calcNextDate(todayStr,t.recurrence);
       if(next){
         const copy=JSON.parse(JSON.stringify(t));
         copy.id=uid();copy.status='לביצוע';copy.due=next;
@@ -3739,7 +3934,9 @@ function toggleTaskDone(id,checked){
   } else {
     t.status=DB.customStatuses[0]||'לביצוע';
   }
-  (t.activity=t.activity||[]).push({text:checked?'המשימה הושלמה':'המשימה נפתחה מחדש',time:'עכשיו'});
+  (t.activity=t.activity||[]).push({text:checked?'המשימה הושלמה':'המשימה נפתחה מחדש',ts:nowTs()});
+  // FIX-10: targeted goal recalc (only when this task is linked to a goal)
+  if(t.goalId) recalcGoalProgressFor(t.goalId);
   saveDB();renderContent();
 }
 
@@ -3760,7 +3957,10 @@ function deleteTask(id){
   if(!t) return;
   confirmDialog(`למחוק את המשימה "${t.name}"?`,()=>{
     takeSnapshot(`נמחקה משימה "${t.name}"`);
+    const gid=t.goalId;
     DB.tasks=DB.tasks.filter(x=>x.id!==id);
+    // FIX-10: if the deleted task was linked to a goal, recalc that goal
+    if(gid) recalcGoalProgressFor(gid);
     saveDB();closeModal();renderContent();
   });
 }
@@ -3814,7 +4014,7 @@ function addComment(id){
   if(!txt) return;
   const t=DB.tasks.find(x=>x.id===id);
   if(!t) return;
-  (t.comments=t.comments||[]).push({id:uid(),author:DB.user.avatar,text:txt,time:'עכשיו'});
+  (t.comments=t.comments||[]).push({id:uid(),author:DB.user.avatar,text:txt,ts:nowTs()});
   saveDB();
   if(inp) inp.value='';
   renderTaskModal(t);
@@ -4390,6 +4590,8 @@ async function syncToGist(){
     DB.lastSync=new Date().toISOString();
     localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));
     setSyncStatus('synced');
+    // FIX-12: manual success resets the auto-sync failure counter
+    _gistFailures=0;
     showToast('סונכרן לענן ✓');
   }catch(e){
     setSyncStatus('error');
@@ -4400,6 +4602,9 @@ async function syncToGist(){
   }
 }
 
+// FIX-12: silent sync increments a failure counter on error. After 3 failures
+// in a row, saveDB() stops scheduling new syncs (see that function) and we
+// notify the user once. A successful manual sync resets the counter.
 async function syncToGistSilent(){
   if(_gistSyncing) return;
   if(!DB.gistToken||!DB.gistId) return;
@@ -4415,9 +4620,14 @@ async function syncToGistSilent(){
     DB.lastSync=new Date().toISOString();
     localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));
     setSyncStatus('synced');
+    _gistFailures=0;
   }catch(e){
     setSyncStatus('error');
-    console.warn('silent sync failed:',e);
+    _gistFailures++;
+    console.warn('silent sync failed ('+_gistFailures+'/'+_gistMaxFailures+'):',e);
+    if(_gistFailures>=_gistMaxFailures){
+      showToast('סינכרון אוטומטי הושהה — בדוק טוקן בהגדרות ⚠️');
+    }
   }finally{
     _gistSyncing=false;
   }
@@ -4448,8 +4658,10 @@ async function syncFromGist(){
       const tok=DB.gistToken,gid=DB.gistId;
       DB=remote;
       DB.gistToken=tok;DB.gistId=gid;
-      saveDB();
+      saveDBFull();
       setSyncStatus('synced');
+      // FIX-12: successful pull also resets the failure counter
+      _gistFailures=0;
       renderAll();
       showToast('נמשך מהענן ✓');
     };
@@ -4501,7 +4713,11 @@ function importDataFile(e){
         DB.settings={...def.settings,...(imported.settings||{})};
         DB.user={...def.user,...(imported.user||{})};
         DB.version=DB_VERSION;
-        saveDB();renderAll();showToast('ייבוא הושלם ✓');
+        // FIX-10: full recalc after replacing the whole DB (new goal<->task links)
+        DB=ensureGeneralSpace(DB);
+        saveDBFull();
+        renderAll();
+        showToast('ייבוא הושלם ✓');
       });
     }catch(err){showToast('קובץ לא תקין ⚠️');}
   };
@@ -4514,7 +4730,8 @@ function resetData(){
     takeSnapshot('איפוס מלא');
     localStorage.removeItem(STORAGE_KEY);
     DB=defaultDB();
-    saveDB();
+    // FIX-10: default DB has goals; run full recalc to align with the (empty) task list
+    saveDBFull();
     state.view='dashboard';state.space=null;state.folder=null;state.list=null;
     renderAll();
     showToast('הנתונים אופסו ✓');
@@ -4535,6 +4752,8 @@ function showModal(html,alreadyRendered){
 function closeModal(){
   const ov=document.getElementById('modalOverlay');
   if(ov) ov.classList.add('hidden');
+  // FIX-1: clear the someday conversion flag in case user cancelled mid-flow.
+  state._somedayBeingConverted=null;
   // re-render content to reflect any changes made inside the modal
   renderContent();
 }
@@ -4678,6 +4897,15 @@ function init(){
       }
       renderMobileViewTabs();
     },120);
+  });
+
+  // FIX-3: flush pending doc/title saves before the tab goes away.
+  // `beforeunload` covers desktop; `visibilitychange` covers iOS Safari where
+  // beforeunload is unreliable. `pagehide` is also safer for bfcache.
+  window.addEventListener('beforeunload',flushDocSave);
+  window.addEventListener('pagehide',flushDocSave);
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='hidden') flushDocSave();
   });
 
   // create hidden file input for import
