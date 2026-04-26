@@ -2895,6 +2895,8 @@ function saveGistCredentials(){
 }
 
 function renderSettingsData(){
+  // FEATURE: count completed tasks across the whole DB for the bulk-clear button.
+  const completedCount=DB.tasks.filter(t=>t.status==='הושלם').length;
   return `
     <div class="settings-section">
       <h3>ניהול נתונים</h3>
@@ -2902,6 +2904,13 @@ function renderSettingsData(){
         <button class="btn btn-ghost" onclick="exportData()">⬇ ייצוא JSON</button>
         <button class="btn btn-ghost" onclick="importDataBtn()">⬆ ייבוא JSON</button>
       </div>
+      ${completedCount?`
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:14px">
+          <div style="font-weight:600;margin-bottom:4px">🧹 ניקוי משימות שהושלמו</div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:10px">מחיקה מרוכזת של כל המשימות בסטטוס "הושלם" בכל המרחבים והרשימות. ניתן לבטל תוך 8 שניות.</div>
+          <button class="btn btn-ghost" onclick="clearAllCompleted()">🗑️ נקה ${completedCount} משימות שהושלמו</button>
+        </div>
+      `:''}
       <div style="background:var(--red-bg);border:1px solid rgba(247,106,106,0.2);border-radius:var(--radius-sm);padding:14px">
         <div style="font-weight:600;margin-bottom:6px;color:var(--red)">⚠️ אזור מסוכן</div>
         <div style="font-size:12px;color:var(--text2);margin-bottom:10px">פעולה זו תמחק את כל הנתונים ותחזיר את האפליקציה למצב התחלתי</div>
@@ -3596,12 +3605,19 @@ function renderFilterBar(tasks){
   const statuses=[...new Set(tasks.map(t=>t.status))];
   const priorities=[...new Set(tasks.map(t=>t.priority))];
   const hasActive=state.filterStatus.length||state.filterPriority.length||state.searchQuery;
+  // FEATURE: clear-completed button appears only when looking at a specific list
+  // and there are completed tasks IN THAT LIST (we count from the unfiltered list,
+  // not from `tasks` which may be already filtered by status chip).
+  const completedInList = state.list
+    ? DB.tasks.filter(t=>t.listId===state.list&&t.status==='הושלם').length
+    : 0;
   return `
     <div class="filter-bar">
       <input class="input" placeholder="🔍 חיפוש..." value="${escAttr(state.searchQuery)}" oninput="state.searchQuery=this.value;renderContent();setTimeout(()=>document.querySelector('.filter-bar .input')?.focus(),0)" style="max-width:220px">
       ${statuses.map(s=>`<span class="filter-chip${state.filterStatus.includes(s)?' active':''}" onclick="toggleFilter('status','${escJs(s)}')"><span style="width:8px;height:8px;border-radius:50%;background:${STATUS_COLORS[s]||'#606078'}"></span>${escHtml(s)}</span>`).join('')}
       ${priorities.map(p=>`<span class="filter-chip${state.filterPriority.includes(p)?' active':''}" onclick="toggleFilter('priority','${escJs(p)}')">${PRIORITY_ICONS[p]||''} ${escHtml(p)}</span>`).join('')}
       ${hasActive?`<button class="btn btn-ghost btn-sm" onclick="clearFilters()">נקה הכל ✕</button>`:''}
+      ${completedInList?`<button class="btn btn-ghost btn-sm" style="margin-right:auto;color:var(--text2)" onclick="clearCompletedInList('${escJs(state.list)}')" title="מחיקת כל המשימות שהושלמו ברשימה זו">🗑️ נקה הושלמו (${completedInList})</button>`:''}
     </div>
   `;
 }
@@ -3963,6 +3979,47 @@ function deleteTask(id){
     if(gid) recalcGoalProgressFor(gid);
     saveDB();closeModal();renderContent();
   });
+}
+
+// FEATURE: bulk-clear completed tasks.
+// Two entry points: clearCompletedInList(listId) for a single list (button in
+// the list header), and clearAllCompleted() for the whole DB (Settings → data).
+// Both: confirm dialog, snapshot for undo (8s), targeted goal recalc.
+function clearCompletedInList(listId){
+  const completed=DB.tasks.filter(t=>t.listId===listId&&t.status==='הושלם');
+  if(!completed.length){showToast('אין משימות שהושלמו ברשימה זו');return;}
+  const li=DB.lists.find(l=>l.id===listId);
+  const listName=li?li.name:'';
+  confirmDialog(
+    `למחוק ${completed.length} משימות שהושלמו מהרשימה "${listName}"?\nניתן לבטל תוך 8 שניות.`,
+    ()=>{
+      takeSnapshot(`נמחקו ${completed.length} משימות שהושלמו`);
+      const goalIds=new Set(completed.map(t=>t.goalId).filter(Boolean));
+      const ids=new Set(completed.map(t=>t.id));
+      DB.tasks=DB.tasks.filter(t=>!ids.has(t.id));
+      goalIds.forEach(gid=>recalcGoalProgressFor(gid));
+      saveDB();renderContent();
+      showToast(`נמחקו ${completed.length} משימות ✓`);
+    },
+    'מחק'
+  );
+}
+function clearAllCompleted(){
+  const completed=DB.tasks.filter(t=>t.status==='הושלם');
+  if(!completed.length){showToast('אין משימות שהושלמו');return;}
+  confirmDialog(
+    `למחוק ${completed.length} משימות שהושלמו מכל המערכת?\nניתן לבטל תוך 8 שניות.`,
+    ()=>{
+      takeSnapshot(`נמחקו ${completed.length} משימות שהושלמו`);
+      const goalIds=new Set(completed.map(t=>t.goalId).filter(Boolean));
+      const ids=new Set(completed.map(t=>t.id));
+      DB.tasks=DB.tasks.filter(t=>!ids.has(t.id));
+      goalIds.forEach(gid=>recalcGoalProgressFor(gid));
+      saveDB();renderContent();
+      showToast(`נמחקו ${completed.length} משימות ✓`);
+    },
+    'מחק הכל'
+  );
 }
 
 function duplicateTask(id){
