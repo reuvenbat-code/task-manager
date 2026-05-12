@@ -369,11 +369,11 @@ select.form-input option{background:var(--bg3)}
 .doc-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-sm)}
 .doc-card-icon{font-size:28px;margin-bottom:10px}
 .doc-card-title{font-weight:600;font-size:14px;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.doc-editor{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-.doc-editor-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.doc-editor{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius)}
+.doc-editor-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;border-radius:var(--radius) var(--radius) 0 0}
 .doc-editor-title{flex:1;background:none;border:none;color:var(--text);font-family:inherit;font-size:20px;font-weight:700;outline:none}
 .doc-editor-title::placeholder{color:var(--text3)}
-.doc-toolbar{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:4px;flex-wrap:wrap}
+.doc-toolbar{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:4px;flex-wrap:wrap;position:sticky;top:0;background:var(--bg2);z-index:5;backdrop-filter:blur(6px)}
 .doc-toolbar-btn{padding:5px 8px;background:none;border:none;color:var(--text3);cursor:pointer;border-radius:4px;font-size:13px;transition:var(--transition);font-family:inherit;display:flex;align-items:center}
 .doc-toolbar-btn:hover{background:var(--bg3);color:var(--text)}
 .doc-toolbar-btn.active{background:var(--accent-bg);color:var(--accent2)}
@@ -389,6 +389,28 @@ select.form-input option{background:var(--bg3)}
 .goal-target{display:flex;align-items:center;gap:10px;font-size:13px}
 .goal-target-bar{flex:1;height:4px;background:var(--bg4);border-radius:2px;overflow:hidden}
 .goal-target-fill{height:100%;border-radius:2px}
+/* milestones */
+.ms-marker{position:absolute;top:-3px;width:10px;height:10px;border-radius:50%;background:var(--bg2);border:2px solid var(--text3);transform:translateX(50%);transition:var(--transition);z-index:2}
+.ms-marker.done{background:var(--green);border-color:var(--green)}
+.ms-list{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 10px 0;padding:0 4px}
+.ms-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:14px;font-size:11px;color:var(--text2);transition:var(--transition);user-select:none}
+.ms-chip:hover{border-color:var(--border2);color:var(--text)}
+.ms-chip.done{background:var(--green-bg);border-color:rgba(34,201,122,0.3);color:var(--green)}
+.ms-chip.overdue{background:var(--red-bg);border-color:rgba(247,106,106,0.3);color:var(--red)}
+.ms-chip .ms-icon{font-size:10px}
+.ms-chip .ms-name{font-weight:500}
+.ms-chip .ms-info{font-size:10px;opacity:0.85}
+.ms-chip .ms-auto{font-size:9px;background:var(--accent-bg);color:var(--accent2);padding:1px 5px;border-radius:8px;font-weight:600}
+/* milestone editor inside goal-edit modal */
+.ms-editor{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;margin-top:8px}
+.ms-editor-title{font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px}
+.ms-row{display:grid;grid-template-columns:1fr auto auto auto;gap:6px;padding:6px;background:var(--bg2);border-radius:4px;margin-bottom:4px;align-items:center}
+.ms-row select,.ms-row input{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;outline:none}
+.ms-row select:focus,.ms-row input:focus{border-color:var(--accent)}
+@media(max-width:768px){
+  .ms-row{grid-template-columns:1fr 1fr;gap:6px}
+  .ms-row > *:nth-child(1){grid-column:1/-1}
+}
 .time-tracker{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:14px;display:flex;align-items:center;gap:12px}
 .timer-display{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:1px;min-width:90px}
 .timer-running .timer-display{color:var(--green)}
@@ -582,7 +604,7 @@ select.form-input option{background:var(--bg3)}
       </div>
     </div>
     <div class="sb-search">
-      <input type="text" placeholder="🔍  חיפוש..." id="globalSearch" oninput="globalSearchFn(this.value)">
+      <input type="text" placeholder="🔍  חיפוש..." id="globalSearch" oninput="globalSearchFnDebounced(this.value)">
     </div>
     <div class="sb-nav" id="sidebarNav"></div>
     <div class="sb-bottom">
@@ -783,11 +805,50 @@ function ensureGeneralSpace(db){
 }
 
 // Recalculate 'task_count' targets across all goals based on current tasks.
+// Uses tasksByGoal reverse index — O(linked_tasks) instead of O(all_tasks * goals).
+// Also processes auto-mode milestones: at the target level (per-target %)
+// and at the goal level (overall progress = average of all target %).
 function recalcGoalProgress(){
+  const today=new Date().toISOString().slice(0,10);
   (DB.goals||[]).forEach(g=>{
+    let doneCount=null;
+    let overallSum=0,overallCount=0;
     (g.targets||[]).forEach(t=>{
       if(t.type==='task_count'){
-        t.current=DB.tasks.filter(tk=>tk.goalId===g.id&&tk.status==='הושלם').length;
+        if(doneCount===null){
+          const linked=IDX.tasksByGoal.get(g.id);
+          if(linked){
+            doneCount=0;
+            linked.forEach(tid=>{
+              const tk=IDX.tasks.get(tid);
+              if(tk&&tk.status==='הושלם') doneCount++;
+            });
+          } else doneCount=0;
+        }
+        t.current=doneCount;
+      }
+      // per-target auto milestones — threshold is % of this target alone
+      const tPct=t.total>0?(t.current/t.total)*100:0;
+      (t.milestones||[]).forEach(m=>{
+        if(m.mode==='auto'&&!m.done){
+          if(typeof m.threshold==='number'&&tPct>=m.threshold){
+            m.done=true;
+            m.doneAt=today;
+          }
+        }
+      });
+      // contribute to overall (capped at 100 so over-achieved targets don't skew)
+      overallSum+=Math.min(100,tPct);
+      overallCount++;
+    });
+    // goal-level auto milestones — threshold is % of the goal's overall progress
+    const overallPct=overallCount>0?overallSum/overallCount:0;
+    (g.milestones||[]).forEach(m=>{
+      if(m.mode==='auto'&&!m.done){
+        if(typeof m.threshold==='number'&&overallPct>=m.threshold){
+          m.done=true;
+          m.doneAt=today;
+        }
       }
     });
   });
@@ -798,9 +859,38 @@ let _gistSyncTimer=null;
 let _gistSyncing=false;
 let _syncStatus='idle'; // idle|pending|synced|error
 
+// =============================================================
+// Storage service — debounced localStorage write
+// (in-memory state is always current; persistence is deferred)
+// =============================================================
+const Storage = {
+  _writeTimer:null,
+  _pending:false,
+  // schedule a write within 200ms; coalesces bursts of saves
+  scheduleWrite(){
+    this._pending=true;
+    if(this._writeTimer) return;
+    this._writeTimer=setTimeout(()=>{
+      this._writeTimer=null;
+      if(this._pending) this.flush();
+    },200);
+  },
+  // immediate write — used before unload / explicit user action
+  flush(){
+    this._pending=false;
+    if(this._writeTimer){clearTimeout(this._writeTimer);this._writeTimer=null;}
+    try{
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));
+    }catch(e){
+      console.warn('Storage flush failed:',e);
+    }
+  }
+};
+
 function saveDB(){
+  rebuildIndexes();
   recalcGoalProgress();
-  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(DB));}catch(e){console.warn('saveDB failed:',e);}
+  Storage.scheduleWrite();
   if(DB.gistToken&&DB.gistId){
     setSyncStatus('pending');
     clearTimeout(_gistSyncTimer);
@@ -808,7 +898,82 @@ function saveDB(){
   }
 }
 
+// flush before unload so data isn't lost mid-debounce
+window.addEventListener('beforeunload',()=>Storage.flush());
+window.addEventListener('pagehide',()=>Storage.flush());
+// also flush when tab becomes hidden (mobile background)
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden') Storage.flush();
+});
+
 function uid(){return 't'+Date.now()+Math.random().toString(36).slice(2,7)}
+
+// =============================================================
+// PERF: Map-based indexes for O(1) lookup
+// Built once on load, kept in sync via mutation helpers.
+// =============================================================
+const IDX = {
+  tasks:new Map(),
+  lists:new Map(),
+  spaces:new Map(),
+  folders:new Map(),
+  goals:new Map(),
+  docs:new Map(),
+  // reverse indexes (used for goal progress + filtering)
+  tasksByGoal:new Map(),    // goalId -> Set<taskId>
+  tasksByList:new Map()     // listId -> Set<taskId>
+};
+
+function rebuildIndexes(){
+  IDX.tasks.clear();IDX.lists.clear();IDX.spaces.clear();
+  IDX.folders.clear();IDX.goals.clear();IDX.docs.clear();
+  IDX.tasksByGoal.clear();IDX.tasksByList.clear();
+  (DB.tasks||[]).forEach(t=>{
+    IDX.tasks.set(t.id,t);
+    if(t.goalId){
+      let s=IDX.tasksByGoal.get(t.goalId);
+      if(!s){s=new Set();IDX.tasksByGoal.set(t.goalId,s);}
+      s.add(t.id);
+    }
+    if(t.listId){
+      let s=IDX.tasksByList.get(t.listId);
+      if(!s){s=new Set();IDX.tasksByList.set(t.listId,s);}
+      s.add(t.id);
+    }
+  });
+  (DB.lists||[]).forEach(l=>IDX.lists.set(l.id,l));
+  (DB.spaces||[]).forEach(s=>IDX.spaces.set(s.id,s));
+  (DB.folders||[]).forEach(f=>IDX.folders.set(f.id,f));
+  (DB.goals||[]).forEach(g=>IDX.goals.set(g.id,g));
+  (DB.docs||[]).forEach(d=>IDX.docs.set(d.id,d));
+}
+
+// O(1) lookup helpers — use these instead of DB.collection.find(...)
+const findTask  = id => IDX.tasks.get(id);
+const findList  = id => IDX.lists.get(id);
+const findSpace = id => IDX.spaces.get(id);
+const findFolder= id => IDX.folders.get(id);
+const findGoal  = id => IDX.goals.get(id);
+const findDoc   = id => IDX.docs.get(id);
+const tasksOfGoal = goalId => {
+  const s=IDX.tasksByGoal.get(goalId);
+  return s?Array.from(s,id=>IDX.tasks.get(id)).filter(Boolean):[];
+};
+const tasksOfList = listId => {
+  const s=IDX.tasksByList.get(listId);
+  return s?Array.from(s,id=>IDX.tasks.get(id)).filter(Boolean):[];
+};
+// Count of open (non-done) tasks in a list — O(linked_count) without allocating array
+const openTasksCountOfList = listId => {
+  const s=IDX.tasksByList.get(listId);
+  if(!s) return 0;
+  let c=0;
+  s.forEach(id=>{
+    const t=IDX.tasks.get(id);
+    if(t&&t.status!=='הושלם') c++;
+  });
+  return c;
+};
 
 function setSyncStatus(s){
   _syncStatus=s;
@@ -911,8 +1076,8 @@ const PALETTE=['#7c6af7','#22c97a','#f7a84a','#f76a6a','#4ab4f7','#f76acd','#f7e
 // ============================================================
 // HELPERS
 // ============================================================
-function getListName(id){const l=DB.lists.find(x=>x.id===id);return l?l.name:'';}
-function getTaskName(id){const t=DB.tasks.find(x=>x.id===id);return t?t.name:'(נמחק)';}
+function getListName(id){const l=findList(id);return l?l.name:'';}
+function getTaskName(id){const t=findTask(id);return t?t.name:'(נמחק)';}
 function formatDate(d){if(!d) return '';try{return new Date(d).toLocaleDateString('he-IL',{day:'numeric',month:'short'})}catch{return d;}}
 function tagColor(tag){return TAG_COLORS[tag]||'purple';}
 function priorityColor(p){const map={'דחופה':'red','גבוהה':'orange','בינונית':'purple','נמוכה':'blue','ללא':'purple'};return map[p]||'purple';}
@@ -1028,7 +1193,7 @@ function renderSpacesNav(){
           <div class="sb-item sb-item-sub${state.list===li.id?' active':''}" onclick="navigateList('${escJs(sp.id)}','','${escJs(li.id)}')">
             <span class="icon" style="color:${escAttr(li.color)}">≡</span>
             <span class="label">${escHtml(li.name)}</span>
-            <span class="count">${DB.tasks.filter(t=>t.listId===li.id&&t.status!=='הושלם').length}</span>
+            <span class="count">${openTasksCountOfList(li.id)}</span>
           </div>
         `).join('')}
         ${folders.map(fl=>{
@@ -1044,7 +1209,7 @@ function renderSpacesNav(){
               <div class="sb-item${state.list===li.id?' active':''}" style="padding-right:36px" onclick="navigateList('${escJs(sp.id)}','${escJs(fl.id)}','${escJs(li.id)}')">
                 <span class="icon" style="color:${escAttr(li.color)}">≡</span>
                 <span class="label">${escHtml(li.name)}</span>
-                <span class="count">${DB.tasks.filter(t=>t.listId===li.id&&t.status!=='הושלם').length}</span>
+                <span class="count">${openTasksCountOfList(li.id)}</span>
               </div>
             `).join('')}
           `;
@@ -1078,7 +1243,7 @@ function navigateList(spaceId,folderId,listId){
 
 function openSpaceMenu(e,spaceId){
   e.stopPropagation();
-  const sp=DB.spaces.find(s=>s.id===spaceId);
+  const sp=findSpace(spaceId);
   if(!sp) return;
   document.getElementById('ctxMenu')?.remove();
   const menu=document.createElement('div');
@@ -1100,7 +1265,7 @@ function openSpaceMenu(e,spaceId){
 
 function openFolderMenu(e,spaceId,folderId){
   e.stopPropagation();
-  const fl=DB.folders.find(f=>f.id===folderId);
+  const fl=findFolder(folderId);
   if(!fl) return;
   document.getElementById('ctxMenu')?.remove();
   const menu=document.createElement('div');
@@ -1122,7 +1287,7 @@ function closeCtxMenu(){document.getElementById('ctxMenu')?.remove();}
 function openStatusPicker(e,taskId){
   e.stopPropagation();
   document.getElementById('ctxMenu')?.remove();
-  const t=DB.tasks.find(x=>x.id===taskId);
+  const t=findTask(taskId);
   if(!t) return;
   const menu=document.createElement('div');
   menu.id='ctxMenu';
@@ -1140,7 +1305,7 @@ function openStatusPicker(e,taskId){
 }
 
 function setTaskStatus(id,status){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   t.status=status;
   if(status==='הושלם'&&t.recurrence&&t.due){
@@ -1167,7 +1332,7 @@ function deleteSpaceById(id){deleteSpace({stopPropagation:function(){}},id);}
 function deleteFolderById(id){deleteFolder({stopPropagation:function(){}},id);}
 
 function editSpaceModal(id){
-  const sp=DB.spaces.find(s=>s.id===id);
+  const sp=findSpace(id);
   if(!sp) return;
   showModal(`
     <div class="modal-header">
@@ -1203,7 +1368,7 @@ function editSpaceModal(id){
 }
 
 function saveSpace(id){
-  const sp=DB.spaces.find(s=>s.id===id);
+  const sp=findSpace(id);
   if(!sp) return;
   const name=document.getElementById('es_name')?.value?.trim();
   if(!name){showToast('חובה להזין שם ⚠️');return;}
@@ -1214,7 +1379,7 @@ function saveSpace(id){
 }
 
 function editFolderModal(id){
-  const fl=DB.folders.find(f=>f.id===id);
+  const fl=findFolder(id);
   if(!fl) return;
   showModal(`
     <div class="modal-header">
@@ -1239,7 +1404,7 @@ function editFolderModal(id){
 }
 
 function saveFolder(id){
-  const fl=DB.folders.find(f=>f.id===id);
+  const fl=findFolder(id);
   if(!fl) return;
   const name=document.getElementById('ef_name')?.value?.trim();
   if(!name){showToast('חובה להזין שם ⚠️');return;}
@@ -1257,7 +1422,7 @@ function pickColor(el,inputId,color){
 
 function deleteSpace(e,id){
   e.stopPropagation();
-  const sp=DB.spaces.find(s=>s.id===id);
+  const sp=findSpace(id);
   if(!sp) return;
   if(sp.protected){showToast('מרחב "כללי" מוגן ממחיקה ⚠️');return;}
   const folderIds=DB.folders.filter(f=>f.spaceId===id).map(f=>f.id);
@@ -1281,7 +1446,7 @@ function deleteSpace(e,id){
 
 function deleteFolder(e,id){
   e.stopPropagation();
-  const fl=DB.folders.find(f=>f.id===id);
+  const fl=findFolder(id);
   if(!fl) return;
   const listIds=DB.lists.filter(l=>l.folderId===id).map(l=>l.id);
   const taskCount=DB.tasks.filter(t=>listIds.includes(t.listId)).length;
@@ -1365,7 +1530,7 @@ function renderHeader(){
   else if(state.view==='inbox'){crumbs='<span class="current">📥 אינבוקס GTD</span>';actions=`<button class="btn btn-primary btn-sm" onclick="startWeeklyReview()">🔄 סקירה שבועית</button>`;}
   else if(state.view==='help'){crumbs='<span class="current">❓ מדריך שימוש</span>';}
   else if(state.view==='space'&&state.space){
-    const sp=DB.spaces.find(s=>s.id===state.space);
+    const sp=findSpace(state.space);
     crumbs=`<span class="current">${escHtml(sp?sp.name:'')}</span>`;
     actions=`
       <button class="btn btn-ghost btn-sm" onclick="openNewListModal(null,'${escJs(state.space)}','')">+ רשימה</button>
@@ -1373,15 +1538,15 @@ function renderHeader(){
     `;
   }
   else if(state.view==='folder'&&state.folder){
-    const sp=DB.spaces.find(s=>s.id===state.space);
-    const fl=DB.folders.find(f=>f.id===state.folder);
+    const sp=findSpace(state.space);
+    const fl=findFolder(state.folder);
     crumbs=`<span class="crumb" onclick="navigateSpace('${escJs(state.space)}')">${escHtml(sp?sp.name:'')}</span><span class="sep">›</span><span class="current">${escHtml(fl?fl.name:'')}</span>`;
     actions=`<button class="btn btn-primary btn-sm" onclick="openNewListModal(null,'${escJs(state.space)}','${escJs(state.folder)}')">+ רשימה</button>`;
   }
   else if(state.view==='list-view'&&state.list){
-    const sp=DB.spaces.find(s=>s.id===state.space);
-    const fl=state.folder?DB.folders.find(f=>f.id===state.folder):null;
-    const li=DB.lists.find(l=>l.id===state.list);
+    const sp=findSpace(state.space);
+    const fl=state.folder?findFolder(state.folder):null;
+    const li=findList(state.list);
     const folderCrumb=fl?`<span class="crumb" onclick="navigateFolder('${escJs(state.space)}','${escJs(state.folder)}')">${escHtml(fl.name)}</span><span class="sep">›</span>`:'';
     crumbs=`<span class="crumb" onclick="navigateSpace('${escJs(state.space)}')">${escHtml(sp?sp.name:'')}</span><span class="sep">›</span>${folderCrumb}<span class="current">${escHtml(li?li.name:'')}</span>`;
     actions=`
@@ -1784,7 +1949,7 @@ function clearMyFilters(){
 // SPACE / FOLDER VIEW
 // ============================================================
 function renderSpaceView(){
-  const sp=DB.spaces.find(s=>s.id===state.space);
+  const sp=findSpace(state.space);
   if(!sp) return '';
   const folders=DB.folders.filter(f=>f.spaceId===sp.id);
   const directLists=DB.lists.filter(l=>l.spaceId===sp.id&&!l.folderId);
@@ -1793,7 +1958,7 @@ function renderSpaceView(){
     <div class="page-subtitle">מרחב עבודה</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-top:8px">
       ${directLists.map(li=>{
-        const tasks=DB.tasks.filter(t=>t.listId===li.id);
+        const tasks=tasksOfList(li.id);
         const done=tasks.filter(t=>t.status==='הושלם').length;
         return `
           <div class="dash-card" onclick="navigateList('${escJs(sp.id)}','','${escJs(li.id)}')" style="cursor:pointer">
@@ -1831,14 +1996,14 @@ function renderSpaceView(){
 }
 
 function renderFolderView(){
-  const fl=DB.folders.find(f=>f.id===state.folder);
+  const fl=findFolder(state.folder);
   if(!fl) return '';
   const lists=DB.lists.filter(l=>l.folderId===fl.id);
   return `
     <div class="page-title">📂 ${escHtml(fl.name)}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:8px">
       ${lists.map(li=>{
-        const tasks=DB.tasks.filter(t=>t.listId===li.id);
+        const tasks=tasksOfList(li.id);
         const done=tasks.filter(t=>t.status==='הושלם').length;
         return `
           <div class="dash-card" onclick="navigateList('${escJs(state.space)}','${escJs(fl.id)}','${escJs(li.id)}')" style="cursor:pointer">
@@ -1864,9 +2029,9 @@ function renderFolderView(){
 // LIST VIEW
 // ============================================================
 function renderListView(){
-  const li=DB.lists.find(l=>l.id===state.list);
+  const li=findList(state.list);
   if(!li) return '';
-  let tasks=DB.tasks.filter(t=>t.listId===state.list);
+  let tasks=tasksOfList(state.list);
   tasks=applyFilters(tasks);
 
   if(state.taskView==='board') return renderBoardView(tasks,li);
@@ -2116,7 +2281,7 @@ function enableBoardDragDrop(){
       col.classList.remove('drag-over');
       const newStatus=col.dataset.status;
       if(_dragTaskId&&newStatus){
-        const t=DB.tasks.find(x=>x.id===_dragTaskId);
+        const t=findTask(_dragTaskId);
         if(t&&t.status!==newStatus){
           t.status=newStatus;
           saveDB();
@@ -2239,19 +2404,91 @@ function renderGanttView(tasks){
 // ============================================================
 // GOALS
 // ============================================================
+function renderMilestoneChip(goalId,targetId,m,tpct){
+  const auto=m.mode==='auto';
+  const today=new Date().toISOString().slice(0,10);
+  let extraClass='';
+  let info='';
+  if(m.type==='date'){
+    if(m.done){
+      extraClass='done';
+      info=`✓ ${m.doneAt?formatDate(m.doneAt):''}`;
+    } else if(m.targetDate&&m.targetDate<today){
+      extraClass='overdue';
+      info=`⚠ ${formatDate(m.targetDate)}`;
+    } else if(m.targetDate){
+      info=formatDate(m.targetDate);
+    }
+  } else { // process
+    if(m.done){
+      extraClass='done';
+      info=`✓ ${m.doneAt?formatDate(m.doneAt):''}`;
+    }
+  }
+  const autoBadge=auto?`<span class="ms-auto" title="אוטומטי בסף ${m.threshold||0}%">🔄${m.threshold||0}%</span>`:'';
+  const icon=m.type==='date'?'📅':'🔘';
+  // manual milestones get a click-to-toggle; auto ones don't (since they're driven by metric)
+  const toggleHandler=auto?'':`onclick="toggleMilestone('${escJs(goalId)}','${escJs(targetId)}','${escJs(m.id)}')"`;
+  const cursor=auto?'default':'pointer';
+  return `
+    <div class="ms-chip ${extraClass}" style="cursor:${cursor}" ${toggleHandler} title="${escAttr(m.name)}">
+      <span class="ms-icon">${icon}</span>
+      <span class="ms-name">${escHtml(m.name)}</span>
+      ${info?`<span class="ms-info">${escHtml(info)}</span>`:''}
+      ${autoBadge}
+    </div>
+  `;
+}
+
+function toggleMilestone(goalId,targetId,msId){
+  const g=findGoal(goalId);
+  if(!g) return;
+  let arr;
+  if(targetId){
+    const t=g.targets.find(x=>x.id===targetId);
+    if(!t) return;
+    arr=t.milestones||[];
+  } else {
+    arr=g.milestones||[];
+  }
+  const m=arr.find(x=>x.id===msId);
+  if(!m) return;
+  if(m.mode==='auto') return; // safety
+  m.done=!m.done;
+  m.doneAt=m.done?new Date().toISOString().slice(0,10):null;
+  saveDB();
+  renderContent();
+  showToast(m.done?'אבן דרך הושלמה ✓':'אבן דרך בוטלה');
+}
+
+function deleteMilestone(goalId,targetId,msId,fromEdit){
+  const g=findGoal(goalId);
+  if(!g) return;
+  if(targetId){
+    const t=g.targets.find(x=>x.id===targetId);
+    if(!t||!t.milestones) return;
+    t.milestones=t.milestones.filter(m=>m.id!==msId);
+  } else {
+    if(!g.milestones) return;
+    g.milestones=g.milestones.filter(m=>m.id!==msId);
+  }
+  saveDB();
+  if(fromEdit) openEditGoalModal(goalId); else renderContent();
+}
+
 function renderGoals(){
   return `
     <div class="page-title">יעדים 🎯</div>
     <div class="page-subtitle">עקוב אחר מטרות ושייך אליהן משימות</div>
     <div class="goals-grid">
       ${DB.goals.map(g=>{
-        // recalc just in case (defense-in-depth)
+        const linkedTasks=tasksOfGoal(g.id);
+        const doneCount=linkedTasks.reduce((c,t)=>t.status==='הושלם'?c+1:c,0);
+        // defense-in-depth recalc using already-fetched linked list
         (g.targets||[]).forEach(t=>{
-          if(t.type==='task_count') t.current=DB.tasks.filter(tk=>tk.goalId===g.id&&tk.status==='הושלם').length;
+          if(t.type==='task_count') t.current=doneCount;
         });
         const pct=g.targets.length?Math.round(g.targets.reduce((a,t)=>a+Math.min(100,(t.current/Math.max(1,t.total))*100),0)/g.targets.length):0;
-        const linkedTasks=DB.tasks.filter(t=>t.goalId===g.id);
-        const doneCount=linkedTasks.filter(t=>t.status==='הושלם').length;
         return `
           <div class="goal-card">
             <div class="goal-header">
@@ -2267,23 +2504,50 @@ function renderGoals(){
               <span>התקדמות כוללת</span>
               <span style="font-weight:700;color:${escAttr(g.color)}">${pct}%</span>
             </div>
-            <div class="progress-bar" style="height:8px">
+            <div class="progress-bar" style="height:8px;position:relative">
               <div class="progress-fill" style="width:${pct}%;background:${escAttr(g.color)}"></div>
+              ${(g.milestones||[]).filter(m=>m.mode==='auto'&&typeof m.threshold==='number').map(m=>`
+                <span class="ms-marker${m.done?' done':''}" style="right:${Math.min(100,m.threshold)}%;border-color:${escAttr(g.color)};top:-2px" title="${escAttr(m.name)} (${m.threshold}%)"></span>
+              `).join('')}
             </div>
+            ${(g.milestones||[]).length?(()=>{
+              const gDateMs=g.milestones.filter(m=>m.type==='date').slice().sort((a,b)=>(a.targetDate||'').localeCompare(b.targetDate||''));
+              const gProcMs=g.milestones.filter(m=>m.type==='process');
+              return `
+                <div class="ms-list" style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px">
+                  <span style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;width:100%;margin-bottom:2px">🚩 אבני דרך כלליות</span>
+                  ${gDateMs.map(m=>renderMilestoneChip(g.id,'',m,pct)).join('')}
+                  ${gProcMs.map(m=>renderMilestoneChip(g.id,'',m,pct)).join('')}
+                </div>
+              `;
+            })():''}
             <div class="goal-targets">
-              ${g.targets.map(tg=>{
+              ${g.targets.map((tg,tgIdx)=>{
                 const tpct=Math.min(100,Math.round((tg.current/Math.max(1,tg.total))*100));
                 const isAuto=tg.type==='task_count';
+                const milestones=tg.milestones||[];
+                // sort milestones for display: date-based by date, process-based by current order
+                const dateMs=milestones.filter(m=>m.type==='date').slice().sort((a,b)=>(a.targetDate||'').localeCompare(b.targetDate||''));
+                const procMs=milestones.filter(m=>m.type==='process');
                 return `
                   <div class="goal-target">
                     <span style="font-size:13px;width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(tg.name)}">
                       ${isAuto?'<span style="color:var(--accent2);font-size:10px" title="מתעדכן אוטומטית">🔄</span> ':''}${escHtml(tg.name)}
                     </span>
-                    <div class="goal-target-bar">
+                    <div class="goal-target-bar" style="position:relative">
                       <div class="goal-target-fill" style="width:${tpct}%;background:${escAttr(g.color)}"></div>
+                      ${dateMs.filter(m=>m.mode==='auto'&&typeof m.threshold==='number').map(m=>`
+                        <span class="ms-marker${m.done?' done':''}" style="right:${Math.min(100,m.threshold)}%;border-color:${escAttr(g.color)}" title="${escAttr(m.name)} (${m.threshold}%)"></span>
+                      `).join('')}
                     </div>
                     <span style="font-size:12px;color:var(--text3);width:80px;text-align:left">${tg.current.toLocaleString()}/${tg.total.toLocaleString()} ${escHtml(tg.unit||'')}</span>
                   </div>
+                  ${milestones.length?`
+                    <div class="ms-list">
+                      ${dateMs.map(m=>renderMilestoneChip(g.id,tg.id,m,tpct)).join('')}
+                      ${procMs.map(m=>renderMilestoneChip(g.id,tg.id,m,tpct)).join('')}
+                    </div>
+                  `:''}
                 `;
               }).join('')}
             </div>
@@ -2316,10 +2580,10 @@ function renderGoals(){
 
 // Create a task pre-linked to a goal
 function openNewTaskForGoal(goalId){
-  const g=DB.goals.find(x=>x.id===goalId);
+  const g=findGoal(goalId);
   if(!g) return;
   const listOptions=DB.lists.map(l=>{
-    const sp=DB.spaces.find(s=>s.id===l.spaceId);
+    const sp=findSpace(l.spaceId);
     return `<option value="${escAttr(l.id)}">${escHtml(sp?sp.name:'')} / ${escHtml(l.name)}</option>`;
   }).join('');
   showModal(`
@@ -2382,7 +2646,7 @@ function createTaskForGoal(goalId){
 }
 
 function unlinkFromGoal(taskId){
-  const t=DB.tasks.find(x=>x.id===taskId);
+  const t=findTask(taskId);
   if(!t) return;
   t.goalId=null;
   (t.activity=t.activity||[]).push({text:'הוסר שיוך ליעד',time:'עכשיו'});
@@ -2396,7 +2660,7 @@ function unlinkFromGoal(taskId){
 let _docSaveTimer=null;
 function renderDocs(){
   if(state.editingDoc){
-    const doc=DB.docs.find(d=>d.id===state.editingDoc);
+    const doc=findDoc(state.editingDoc);
     if(!doc) return '';
     return `
       <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
@@ -2443,10 +2707,10 @@ function renderDocs(){
 }
 
 function editDoc(id){state.editingDoc=id;renderContent();}
-function updateDocTitle(id,val){const d=DB.docs.find(x=>x.id===id);if(d){d.title=val;clearTimeout(_docSaveTimer);_docSaveTimer=setTimeout(()=>saveDB(),500);}}
+function updateDocTitle(id,val){const d=findDoc(id);if(d){d.title=val;clearTimeout(_docSaveTimer);_docSaveTimer=setTimeout(()=>saveDB(),500);}}
 function saveDoc(id){
   const body=document.getElementById('docBody');
-  if(body){const d=DB.docs.find(x=>x.id===id);if(d){d.content=body.innerHTML;d.updated=new Date().toISOString().slice(0,10);saveDB();}}
+  if(body){const d=findDoc(id);if(d){d.content=body.innerHTML;d.updated=new Date().toISOString().slice(0,10);saveDB();}}
   showToast('מסמך נשמר ✓');
 }
 function autoSaveDoc(id){
@@ -2454,14 +2718,14 @@ function autoSaveDoc(id){
   if(!body) return;
   clearTimeout(_docSaveTimer);
   _docSaveTimer=setTimeout(()=>{
-    const d=DB.docs.find(x=>x.id===id);
+    const d=findDoc(id);
     if(d){d.content=body.innerHTML;d.updated=new Date().toISOString().slice(0,10);saveDB();}
   },800);
 }
 function docFmt(cmd){document.execCommand(cmd);}
 function docInsertHeading(){document.execCommand('formatBlock',false,'h2');}
 function deleteDoc(id){
-  const d=DB.docs.find(x=>x.id===id);
+  const d=findDoc(id);
   if(!d) return;
   confirmDialog(`למחוק את המסמך "${d.title}"?`,()=>{
     takeSnapshot(`נמחק מסמך "${d.title}"`);
@@ -2604,7 +2868,7 @@ function stopTimer(){
   state.timerInterval=null;
   state.timerRunning=false;
   if(state.timerTask&&state.timerSeconds>0){
-    const t=DB.tasks.find(x=>x.id===state.timerTask);
+    const t=findTask(state.timerTask);
     if(t){t.timeSpent=(t.timeSpent||0)+Math.round(state.timerSeconds/60);}
     DB.timeEntries=DB.timeEntries||[];
     DB.timeEntries.push({
@@ -2997,7 +3261,7 @@ function processAsTask(id){
 
 function confirmProcessTask(id,text){
   const listOptions=DB.lists.map(l=>{
-    const sp=DB.spaces.find(s=>s.id===l.spaceId);
+    const sp=findSpace(l.spaceId);
     return `<option value="${escAttr(l.id)}">${escHtml(sp?sp.name:'')} / ${escHtml(l.name)}</option>`;
   }).join('');
   showModal(`
@@ -3128,7 +3392,7 @@ function processAsRef(id){
 function doProcessAsRef(id){
   const it=DB.inbox.find(x=>x.id===id);
   const docId=document.getElementById('pr_doc')?.value;
-  const doc=DB.docs.find(d=>d.id===docId);
+  const doc=findDoc(docId);
   if(!it||!doc) return;
   doc.content=(doc.content||'')+`<p>${escHtml(it.text)}</p>`;
   doc.updated=new Date().toISOString().slice(0,10);
@@ -3395,7 +3659,12 @@ const HELP_SECTIONS=[
     {q:'איך יוצרים משימה מתוך יעד?',a:'בכרטיס היעד, לחץ "+ משימה". הטופס ייפתח עם היעד כבר מקושר — פשוט הזן שם, רשימה ותאריך. המשימה תיווצר ותקושר אוטומטית.'},
     {q:'מה ההבדל בין target "ידני" ל"אוטומטי" 🔄?',a:'<b>ידני:</b> אתה מעדכן את הערך הנוכחי בעצמך (עורך את היעד).<br><b>🔄 אוטומטי (task_count):</b> הערך הנוכחי מחושב אוטומטית = מספר המשימות המושלמות המשויכות ליעד. השדה "נוכחי" נעול בעריכה.'},
     {q:'איך משנים target קיים לאוטומטי?',a:'לחץ ✏️ על היעד → בשורת ה-target בחר "🔄 אוטומטי" ב-dropdown "סוג". השדה "נוכחי" יינעל והתקדמות תתחיל להתעדכן מעכשיו לפי משימות משויכות.'},
-    {q:'מה קורה כשמשלימים משימה משויכת?',a:'כל הקריאות ל-saveDB() מפעילות חישוב מחדש של ה-targets האוטומטיים. כלומר: כשתסמן "הושלם", הערך הנוכחי של היעד יעלה ב-1, וההתקדמות תתעדכן מיידית.'}
+    {q:'מה קורה כשמשלימים משימה משויכת?',a:'כל הקריאות ל-saveDB() מפעילות חישוב מחדש של ה-targets האוטומטיים. כלומר: כשתסמן "הושלם", הערך הנוכחי של היעד יעלה ב-1, וההתקדמות תתעדכן מיידית.'},
+    {q:'🚩 מה זה אבני דרך (יעדי ביניים)?',a:'אבני דרך הן נקודות ציון בתוך יעד. אפשר להגדיר אותן בשתי רמות:<br><b>1. ברמת היעד הכללי</b> — נמדדות מול ההתקדמות הממוצעת של כל יעדי המשנה. שימושיות לציוני דרך אסטרטגיים ("סוף Q1", "השקת Beta").<br><b>2. בתוך target ספציפי</b> — נמדדות מול אחוז ההתקדמות של ה-target הזה בלבד.<br>שני סוגים: <b>📅 תאריך</b> או <b>🔘 שלב</b>. הסימון: <b>ידני</b> (לחיצה) או <b>🔄 אוטומטי</b> (סף %).'},
+    {q:'מתי לבחור אבן דרך כללית מול בתוך target?',a:'<b>כללית</b> — כשהמילסטון חוצה את כל היעד ("רבעון 1 הושלם", "Beta launched"). הסף האוטומטי שלה הוא % מההתקדמות הכוללת של היעד.<br><b>בתוך target</b> — כשהמילסטון רלוונטית רק למדד בודד ("הגעתי ל-50% משימות"). הסף האוטומטי שלה הוא % מהמדד הזה בלבד.'},
+    {q:'איך מוסיפים אבן דרך?',a:'לחץ ✏️ על היעד → תחת כל target יש אזור "🚩 אבני דרך" → לחץ "+ אבן דרך". מלא שם, בחר תאריך/שלב, ידני/אוטומטי. אם אוטומטי — קבע סף אחוזים (0-100). שמור.'},
+    {q:'איך מסמנים אבן דרך כהושלמה?',a:'<b>ידני:</b> ב-card של היעד, לחץ על הצ׳יפ של אבן הדרך — תתחלף לירוק עם תאריך השלמה. לחיצה נוספת מבטלת.<br><b>אוטומטי:</b> מתסמן לבד כשהמדד מגיע לסף שהוגדר (נשמר תאריך ההשלמה לתיעוד).'},
+    {q:'איך הסימון של אבן דרך מוצג?',a:'<b>בפס ההתקדמות:</b> נקודות אפורות מסמנות את סף האחוזים של אבני דרך אוטומטיות; הן הופכות ירוקות כשהושלמו.<br><b>מתחת ל-target:</b> צ׳יפים עם השם, אייקון (📅 או 🔘), והתאריך/סף. ירוק=הושלם, אדום=באיחור (לתאריכים בלבד).'}
   ]},
   {icon:'📊',title:'תצוגות משימות',items:[
     {q:'איזה תצוגות יש?',a:'ברשימה בודדת יש 4 תצוגות:<br><b>☰ רשימה</b> — קבוצות לפי סטטוס, הוספה מהירה.<br><b>⊞ לוח (Kanban)</b> — עמודות לפי סטטוס, גרירת כרטיסים.<br><b>📅 לוח שנה</b> — לפי תאריך יעד.<br><b>📊 גאנט</b> — ציר זמן עם סרגלים צבעוניים.'},
@@ -3432,7 +3701,7 @@ function renderHelp(){
   return `
     <div class="page-title">❓ מדריך שימוש</div>
     <div class="page-subtitle">כל מה שצריך לדעת על האפליקציה</div>
-    <input class="form-input" placeholder="🔍 חפש..." value="${escAttr(state.helpSearch||'')}" oninput="state.helpSearch=this.value;renderContent();setTimeout(()=>document.querySelector('.form-input[placeholder*=חפש]')?.focus(),0)" style="max-width:400px;margin-bottom:14px">
+    <input class="form-input" placeholder="🔍 חפש..." value="${escAttr(state.helpSearch||'')}" oninput="helpSearchDebounced(this.value)" style="max-width:400px;margin-bottom:14px">
     ${HELP_SECTIONS.map((sec,si)=>{
       const items=sec.items.filter(it=>!q||it.q.toLowerCase().includes(q)||it.a.toLowerCase().includes(q));
       if(!items.length) return '';
@@ -3489,7 +3758,7 @@ function renderFilterBar(tasks){
   const hasActive=state.filterStatus.length||state.filterPriority.length||state.searchQuery;
   return `
     <div class="filter-bar">
-      <input class="input" placeholder="🔍 חיפוש..." value="${escAttr(state.searchQuery)}" oninput="state.searchQuery=this.value;renderContent();setTimeout(()=>document.querySelector('.filter-bar .input')?.focus(),0)" style="max-width:220px">
+      <input class="input" placeholder="🔍 חיפוש..." value="${escAttr(state.searchQuery)}" oninput="searchInputDebounced(this.value)" style="max-width:220px">
       ${statuses.map(s=>`<span class="filter-chip${state.filterStatus.includes(s)?' active':''}" onclick="toggleFilter('status','${escJs(s)}')"><span style="width:8px;height:8px;border-radius:50%;background:${STATUS_COLORS[s]||'#606078'}"></span>${escHtml(s)}</span>`).join('')}
       ${priorities.map(p=>`<span class="filter-chip${state.filterPriority.includes(p)?' active':''}" onclick="toggleFilter('priority','${escJs(p)}')">${PRIORITY_ICONS[p]||''} ${escHtml(p)}</span>`).join('')}
       ${hasActive?`<button class="btn btn-ghost btn-sm" onclick="clearFilters()">נקה הכל ✕</button>`:''}
@@ -3510,14 +3779,35 @@ function toggleFilter(type,val){
 function clearFilters(){state.filterStatus=[];state.filterPriority=[];state.searchQuery='';renderContent();}
 
 function applyFilters(tasks){
-  let out=tasks;
-  if(state.filterStatus.length) out=out.filter(t=>state.filterStatus.includes(t.status));
-  if(state.filterPriority.length) out=out.filter(t=>state.filterPriority.includes(t.priority));
-  if(state.searchQuery){const q=state.searchQuery.toLowerCase();out=out.filter(t=>t.name.toLowerCase().includes(q)||(t.desc||'').toLowerCase().includes(q));}
+  // Pre-compute filter shapes once to avoid repeating work in the predicate.
+  const sf=state.filterStatus.length?new Set(state.filterStatus):null;
+  const pf=state.filterPriority.length?new Set(state.filterPriority):null;
+  const q=state.searchQuery?state.searchQuery.toLowerCase():null;
+
+  let out;
+  if(sf||pf||q){
+    out=[];
+    for(let i=0,n=tasks.length;i<n;i++){
+      const t=tasks[i];
+      if(sf&&!sf.has(t.status)) continue;
+      if(pf&&!pf.has(t.priority)) continue;
+      if(q){
+        const name=t.name?t.name.toLowerCase():'';
+        const desc=t.desc?t.desc.toLowerCase():'';
+        if(name.indexOf(q)===-1&&desc.indexOf(q)===-1) continue;
+      }
+      out.push(t);
+    }
+  } else {
+    out=tasks;
+  }
+
   if(state.sortBy){
-    out=[...out].sort((a,b)=>{
-      const av=a[state.sortBy]||'';const bv=b[state.sortBy]||'';
-      return state.sortDir==='asc'?(av>bv?1:-1):(av<bv?1:-1);
+    const dir=state.sortDir==='asc'?1:-1;
+    const key=state.sortBy;
+    out=out.slice().sort((a,b)=>{
+      const av=a[key]||'',bv=b[key]||'';
+      return av>bv?dir:(av<bv?-dir:0);
     });
   }
   return out;
@@ -3529,6 +3819,36 @@ function globalSearchFn(query){
   state.view='my-tasks';
   renderAll();
 }
+const globalSearchFnDebounced=debounce(globalSearchFn,250);
+
+// Debounce: invoke fn at most once per `wait` ms after last call
+function debounce(fn,wait){
+  let t=null;
+  return function(...args){
+    clearTimeout(t);
+    t=setTimeout(()=>fn.apply(this,args),wait);
+  };
+}
+
+// Debounced versions for high-frequency input
+const searchInputDebounced=debounce((val)=>{
+  state.searchQuery=val;
+  renderContent();
+  // restore focus to input after re-render
+  setTimeout(()=>{
+    const inp=document.querySelector('.filter-bar .input');
+    if(inp){inp.focus();const v=inp.value;inp.value='';inp.value=v;} // moves cursor to end
+  },0);
+},180);
+
+const helpSearchDebounced=debounce((val)=>{
+  state.helpSearch=val;
+  renderContent();
+  setTimeout(()=>{
+    const inp=document.querySelector('.form-input[placeholder*="חפש"]');
+    if(inp){inp.focus();const v=inp.value;inp.value='';inp.value=v;}
+  },0);
+},180);
 
 function sortBy(field){
   if(state.sortBy===field){state.sortDir=state.sortDir==='asc'?'desc':'asc';}
@@ -3584,7 +3904,7 @@ function showToast(msg){
 // TASK MODAL + OPERATIONS
 // ============================================================
 function openTask(id){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   renderTaskModal(t);
   showModal(null,true); // already rendered
@@ -3734,7 +4054,7 @@ function renderTaskModal(t){
 
 // FIX #12: updateTaskField — save without re-rendering modal (only for critical fields)
 function updateTaskField(id,field,val){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   const old=t[field];
   t[field]=val;
@@ -3757,14 +4077,14 @@ function updateTaskField(id,field,val){
 }
 
 function updateTaskTags(id,val){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   t.tags=val.split(',').map(s=>s.trim()).filter(Boolean);
   saveDB();
 }
 
 function updateTaskGoal(id,goalId){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   t.goalId=goalId||null;
   (t.activity=t.activity||[]).push({text:goalId?`שויך ליעד`:'הוסר שיוך ליעד',time:'עכשיו'});
@@ -3774,7 +4094,7 @@ function updateTaskGoal(id,goalId){
 }
 
 function toggleTaskDone(id,checked){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   if(checked){
     t.status='הושלם';
@@ -3809,7 +4129,7 @@ function calcNextDate(dateStr,recurrence){
 }
 
 function deleteTask(id){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   confirmDialog(`למחוק את המשימה "${t.name}"?`,()=>{
     takeSnapshot(`נמחקה משימה "${t.name}"`);
@@ -3819,7 +4139,7 @@ function deleteTask(id){
 }
 
 function duplicateTask(id){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   const copy=JSON.parse(JSON.stringify(t));
   copy.id=uid();copy.name=t.name+' (עותק)';copy.created=new Date().toISOString().slice(0,10);
@@ -3832,7 +4152,7 @@ function duplicateTask(id){
 function addSubtask(id){
   inputDialog('שם תת-המשימה','',(name)=>{
     if(!name.trim()) return;
-    const t=DB.tasks.find(x=>x.id===id);
+    const t=findTask(id);
     if(!t) return;
     (t.subtasks=t.subtasks||[]).push({id:uid(),name:name.trim(),done:false});
     saveDB();
@@ -3841,21 +4161,21 @@ function addSubtask(id){
 }
 
 function toggleSubtask(tid,sid,done){
-  const t=DB.tasks.find(x=>x.id===tid);
+  const t=findTask(tid);
   if(!t) return;
   const s=(t.subtasks||[]).find(x=>x.id===sid);
   if(s){s.done=done;saveDB();renderTaskModal(t);}
 }
 
 function updateSubtaskName(tid,sid,name){
-  const t=DB.tasks.find(x=>x.id===tid);
+  const t=findTask(tid);
   if(!t) return;
   const s=(t.subtasks||[]).find(x=>x.id===sid);
   if(s){s.name=name;saveDB();}
 }
 
 function deleteSubtask(tid,sid){
-  const t=DB.tasks.find(x=>x.id===tid);
+  const t=findTask(tid);
   if(!t) return;
   t.subtasks=(t.subtasks||[]).filter(x=>x.id!==sid);
   saveDB();renderTaskModal(t);
@@ -3865,7 +4185,7 @@ function addComment(id){
   const inp=document.getElementById(`cmt_${id}`);
   const txt=inp?.value?.trim();
   if(!txt) return;
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   (t.comments=t.comments||[]).push({id:uid(),author:DB.user.avatar,text:txt,time:'עכשיו'});
   saveDB();
@@ -3874,14 +4194,14 @@ function addComment(id){
 }
 
 function updateCustomField(id,key,val){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t) return;
   t.customFields=t.customFields||{};
   t.customFields[key]=val;
   saveDB();
 }
 function deleteCustomField(id,key){
-  const t=DB.tasks.find(x=>x.id===id);
+  const t=findTask(id);
   if(!t||!t.customFields) return;
   delete t.customFields[key];
   saveDB();renderTaskModal(t);
@@ -3890,7 +4210,7 @@ function deleteCustomField(id,key){
 function openAddCustomFieldModal(id){
   inputDialog('שם השדה החדש','',(name)=>{
     if(!name.trim()) return;
-    const t=DB.tasks.find(x=>x.id===id);
+    const t=findTask(id);
     if(!t) return;
     t.customFields=t.customFields||{};
     t.customFields[name.trim()]='';
@@ -3903,7 +4223,7 @@ function openAddCustomFieldModal(id){
 // ============================================================
 function openNewTaskModal(defaultStatus){
   const listOptions=DB.lists.map(l=>{
-    const sp=DB.spaces.find(s=>s.id===l.spaceId);
+    const sp=findSpace(l.spaceId);
     return `<option value="${escAttr(l.id)}"${state.list===l.id?' selected':''}>${escHtml(sp?sp.name:'')} / ${escHtml(l.name)}</option>`;
   }).join('');
   showModal(`
@@ -4213,7 +4533,7 @@ function createGoal(){
 }
 
 function openEditGoalModal(id){
-  const g=DB.goals.find(x=>x.id===id);
+  const g=findGoal(id);
   if(!g) return;
   showModal(`
     <div class="modal-header">
@@ -4236,17 +4556,27 @@ function openEditGoalModal(id){
         </div>
       </div>
       <div class="form-group">
+        <label class="form-label">🚩 אבני דרך כלליות (ברמת היעד)</label>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">💡 אבני דרך כלליות נמדדות מול ההתקדמות הממוצעת של כל יעדי המשנה. שימושי למילסטונים בסולם הכולל ("רבעון 1", "Beta launch").</div>
+        <div class="ms-editor" style="margin-top:0">
+          <div class="ms-rows" id="eg_goal_ms" data-ms-goal="${escAttr(g.id)}">
+            ${(g.milestones||[]).map(m=>renderMsEditorRow(m)).join('')}
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addGoalMilestoneRow()" style="margin-top:4px;padding:3px 10px;font-size:11px">+ אבן דרך כללית</button>
+        </div>
+      </div>
+      <div class="form-group">
         <label class="form-label">יעדי משנה</label>
         <div style="font-size:11px;color:var(--text3);margin-bottom:8px">💡 סוג "אוטומטי" מחשב התקדמות לפי מספר המשימות המושלמות שמשויכות ליעד זה</div>
         <div id="eg_targets">
           ${g.targets.map((t,i)=>{
             const isAuto=t.type==='task_count';
             return `
-              <div class="eg_target_row" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;margin-bottom:8px">
+              <div class="eg_target_row" data-tid="${escAttr(t.id)}" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;margin-bottom:8px">
                 <div style="display:grid;grid-template-columns:2fr 1fr auto;gap:6px;margin-bottom:6px">
                   <input class="form-input" data-field="name" value="${escAttr(t.name)}" placeholder="שם היעד">
                   <input class="form-input" data-field="unit" value="${escAttr(t.unit||'')}" placeholder="יחידה">
-                  <button class="btn-icon" onclick="this.closest('.eg_target_row').remove()" style="color:var(--red)">✕</button>
+                  <button class="btn-icon" onclick="this.closest('.eg_target_row').remove()" style="color:var(--red)" title="מחק יעד משנה">✕</button>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
                   <select class="form-input" data-field="type" onchange="egTypeChanged(this)" style="font-size:11px">
@@ -4255,6 +4585,13 @@ function openEditGoalModal(id){
                   </select>
                   <input class="form-input" type="number" data-field="current" value="${t.current}" placeholder="נוכחי" ${isAuto?'disabled title="מחושב אוטומטית"':''}>
                   <input class="form-input" type="number" data-field="total" value="${t.total}" placeholder="יעד">
+                </div>
+                <div class="ms-editor">
+                  <div class="ms-editor-title">🚩 אבני דרך (${(t.milestones||[]).length})</div>
+                  <div class="ms-rows" data-ms-target="${escAttr(t.id)}">
+                    ${(t.milestones||[]).map(m=>renderMsEditorRow(m)).join('')}
+                  </div>
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="addMilestoneRow(this)" style="margin-top:4px;padding:3px 10px;font-size:11px">+ אבן דרך</button>
                 </div>
               </div>
             `;
@@ -4283,11 +4620,68 @@ function egTypeChanged(sel){
   }
 }
 
+// Render one editor row for a milestone (used in goal-edit modal)
+function renderMsEditorRow(m){
+  const id=m?.id||('ms'+uid());
+  const name=m?m.name:'';
+  const type=m?.type||'date';
+  const mode=m?.mode||'manual';
+  const dateVal=m?.targetDate||'';
+  const thresholdVal=(typeof m?.threshold==='number')?m.threshold:50;
+  const done=!!m?.done;
+  return `
+    <div class="ms-row" data-msid="${escAttr(id)}" data-done="${done}">
+      <input data-msf="name" value="${escAttr(name)}" placeholder="שם אבן דרך (למשל: שלב 1, MVP, חצי השנה)">
+      <select data-msf="type" onchange="msEditorTypeChanged(this)">
+        <option value="date" ${type==='date'?'selected':''}>📅 תאריך</option>
+        <option value="process" ${type==='process'?'selected':''}>🔘 שלב</option>
+      </select>
+      <select data-msf="mode" onchange="msEditorModeChanged(this)">
+        <option value="manual" ${mode==='manual'?'selected':''}>ידני</option>
+        <option value="auto" ${mode==='auto'?'selected':''}>🔄 אוטומטי</option>
+      </select>
+      <button type="button" class="btn-icon" onclick="this.closest('.ms-row').remove()" style="color:var(--red);font-size:13px" title="מחק">✕</button>
+      <input data-msf="targetDate" type="date" value="${escAttr(dateVal)}" style="grid-column:1/-1;display:${type==='date'?'block':'none'}" placeholder="תאריך יעד">
+      <input data-msf="threshold" type="number" min="0" max="100" value="${thresholdVal}" style="grid-column:1/-1;display:${mode==='auto'?'block':'none'}" placeholder="סף אחוז (0-100) להשלמה אוטומטית">
+    </div>
+  `;
+}
+
+function msEditorTypeChanged(sel){
+  const row=sel.closest('.ms-row');
+  const dateInp=row.querySelector('[data-msf=targetDate]');
+  if(dateInp) dateInp.style.display=sel.value==='date'?'block':'none';
+}
+
+function msEditorModeChanged(sel){
+  const row=sel.closest('.ms-row');
+  const thInp=row.querySelector('[data-msf=threshold]');
+  if(thInp) thInp.style.display=sel.value==='auto'?'block':'none';
+}
+
+function addMilestoneRow(btn){
+  const container=btn.previousElementSibling; // .ms-rows
+  if(!container) return;
+  const tpl=document.createElement('div');
+  tpl.innerHTML=renderMsEditorRow(null);
+  container.appendChild(tpl.firstElementChild);
+}
+
+function addGoalMilestoneRow(){
+  const container=document.getElementById('eg_goal_ms');
+  if(!container) return;
+  const tpl=document.createElement('div');
+  tpl.innerHTML=renderMsEditorRow(null);
+  container.appendChild(tpl.firstElementChild);
+}
+
 function addTargetRow(){
   const c=document.getElementById('eg_targets');
   if(!c) return;
+  const newTid='gt'+uid();
   const div=document.createElement('div');
   div.className='eg_target_row';
+  div.setAttribute('data-tid',newTid);
   div.style.cssText='background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;margin-bottom:8px';
   div.innerHTML=`
     <div style="display:grid;grid-template-columns:2fr 1fr auto;gap:6px;margin-bottom:6px">
@@ -4303,33 +4697,75 @@ function addTargetRow(){
       <input class="form-input" type="number" data-field="current" value="0" placeholder="נוכחי">
       <input class="form-input" type="number" data-field="total" value="100" placeholder="יעד">
     </div>
+    <div class="ms-editor">
+      <div class="ms-editor-title">🚩 אבני דרך (0)</div>
+      <div class="ms-rows" data-ms-target="${newTid}"></div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addMilestoneRow(this)" style="margin-top:4px;padding:3px 10px;font-size:11px">+ אבן דרך</button>
+    </div>
   `;
   c.appendChild(div);
 }
 
 function saveGoal(id){
-  const g=DB.goals.find(x=>x.id===id);
+  const g=findGoal(id);
   if(!g) return;
   g.title=document.getElementById('eg_title')?.value?.trim()||g.title;
   g.emoji=document.getElementById('eg_emoji')?.value||g.emoji;
   g.deadline=document.getElementById('eg_deadline')?.value||'';
+  // Build lookup of all previous milestones (across targets AND goal-level)
+  // so we can preserve done/doneAt across edits.
+  const prevMs={};
+  (g.milestones||[]).forEach(m=>{prevMs[m.id]=m;});
+  (g.targets||[]).forEach(t=>{(t.milestones||[]).forEach(m=>{prevMs[m.id]=m;});});
+
+  // helper: parse a single .ms-row dom element into a milestone object
+  function parseMsRow(mr){
+    const msId=mr.dataset.msid||('ms'+uid());
+    const prev=prevMs[msId];
+    const msType=mr.querySelector('[data-msf=type]')?.value||'date';
+    const mode=mr.querySelector('[data-msf=mode]')?.value||'manual';
+    const name=mr.querySelector('[data-msf=name]')?.value?.trim()||'אבן דרך';
+    const targetDate=mr.querySelector('[data-msf=targetDate]')?.value||null;
+    const thRaw=mr.querySelector('[data-msf=threshold]')?.value;
+    const threshold=thRaw===''||thRaw===undefined?null:Math.max(0,Math.min(100,parseFloat(thRaw)));
+    return {
+      id:msId,
+      name,
+      type:msType,
+      mode,
+      targetDate:msType==='date'?targetDate:null,
+      threshold:mode==='auto'?threshold:null,
+      done:prev?!!prev.done:false,
+      doneAt:prev?prev.doneAt||null:null
+    };
+  }
+
+  // goal-level milestones — only rows inside #eg_goal_ms
+  const goalMsContainer=document.getElementById('eg_goal_ms');
+  g.milestones=goalMsContainer?Array.from(goalMsContainer.querySelectorAll(':scope > .ms-row')).map(parseMsRow):[];
+
+  // per-target milestones — only rows inside each target's .ms-rows
   const rows=document.querySelectorAll('.eg_target_row');
   g.targets=Array.from(rows).map(r=>{
     const type=r.querySelector('[data-field=type]')?.value||'manual';
+    const tid=r.dataset.tid||('gt'+uid());
+    const msContainer=r.querySelector('.ms-rows');
+    const milestones=msContainer?Array.from(msContainer.querySelectorAll(':scope > .ms-row')).map(parseMsRow):[];
     return {
-      id:'gt'+uid(),
+      id:tid,
       name:r.querySelector('[data-field=name]').value.trim()||'יעד',
       current:parseFloat(r.querySelector('[data-field=current]').value)||0,
       total:parseFloat(r.querySelector('[data-field=total]').value)||100,
       unit:r.querySelector('[data-field=unit]').value||'',
-      type
+      type,
+      milestones
     };
   });
   saveDB();closeModal();renderContent();showToast('יעד עודכן ✓');
 }
 
 function deleteGoal(id){
-  const g=DB.goals.find(x=>x.id===id);
+  const g=findGoal(id);
   if(!g) return;
   confirmDialog(`למחוק את היעד "${g.title}"?`,()=>{
     takeSnapshot(`נמחק יעד "${g.title}"`);
@@ -4693,6 +5129,9 @@ function setupTouch(){
 // INIT
 // ============================================================
 function init(){
+  // build O(1) lookup indexes
+  rebuildIndexes();
+
   // apply saved theme as early as possible
   applyTheme();
 
